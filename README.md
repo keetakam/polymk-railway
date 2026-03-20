@@ -183,3 +183,9 @@ AI agent that copies whale moves and trades Polymarket 24/7 — works from any c
 ---
 
 MIT · Built by [Virixlabs](https://virixlabs.com)
+
+---
+
+## 📡 Live Whale Feed
+
+Join [@polymarketwhales_ai](https://t.me/polymarketwhales_ai) on Telegram — real-time whale alerts delivered to your feed automatically.
