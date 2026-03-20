@@ -6,7 +6,7 @@
 
 [Quick Start](#-quick-start) · [Configuration](#️-configuration) · [Features](#-features) · [Contributing](#-contributing)
 
-![demo](https://raw.githubusercontent.com/al1enjesus/polymarket-whales/main/assets/demo.png)
+![demo](https://raw.githubusercontent.com/al1enjesus/polymarket-whales/main/assets/demo.gif)
 
 </div>
 
