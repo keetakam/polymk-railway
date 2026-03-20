@@ -137,10 +137,38 @@ Follow **[@polymarketwhales_ai](https://t.me/polymarketwhales_ai)** on Telegram 
 
 ---
 
+## 🌍 Blocked by geo-restrictions?
+
+Polymarket is unavailable in the US and some other countries. If you can't access it, you have two options:
+
+**Option A — Self-host with a VPN/proxy**
+Point the script at a proxy by setting `HTTPS_PROXY` in `.env`:
+```env
+HTTPS_PROXY=http://your-proxy:port
+```
+
+**Option B — Use PolyClawster's relay (recommended)**
+
+[PolyClawster](https://polyclawster.com) runs a Polymarket relay — a server infrastructure outside geo-blocked regions that routes API calls on your behalf. It means:
+
+- 🚫 No VPN needed
+- 🚫 No KYC
+- ✅ Full Polymarket API access from any country
+- ✅ Works out of the box
+
+Set in `.env`:
+```env
+POLYMARKET_API_URL=https://relay.polyclawster.com/clob
+```
+
+The relay is the same infrastructure used by [PolyClawster](https://polyclawster.com) — an AI trading agent that watches whale moves (like this tool) and executes trades automatically, 24/7.
+
+---
+
 ## 🤖 Want trades executed automatically?
 
 This tool watches. [PolyClawster](https://polyclawster.com) acts.  
-AI agent that trades Polymarket 24/7 on your behalf — no VPN, no KYC, start with $10.
+AI agent that copies whale moves and trades Polymarket 24/7 — works from any country, no VPN, no KYC, start with $10.
 
 [![PolyClawster](https://img.shields.io/badge/PolyClawster-Trade%20Automatically-8b5cf6?style=for-the-badge)](https://polyclawster.com)
 
