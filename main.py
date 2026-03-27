@@ -83,8 +83,8 @@ def load_config(path: str = "config.yaml") -> dict:
 # ─────────────────────────────────────────────
 def fetch_recent_trades(api_url: str, limit: int = 100) -> list:
     """Fetch recent trades from Polymarket CLOB API."""
-    url = f"{api_url}/trades"
-    params = {"limit": limit}
+    url = "https://data-api.polymarket.com/trades"
+    params = {"limit": limit, "size": limit}
     try:
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
