@@ -492,7 +492,7 @@ def tracker_loop(config):
                         timeout=10
                     )
                 except Exception as e:
-                    logger.warning(f"Telegram error: {{e}}")
+                    logger.warning(f"Telegram error: {str(e)}")
 
         seen_ids = new_seen
         first_run = False
