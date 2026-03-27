@@ -480,6 +480,20 @@ def tracker_loop(config):
 
             logger.info(f"🐋 WHALE: {market[:40]} | {side} | ${amount:,.2f}")
 
+            # Send Telegram
+            bot_token = config["telegram"]["bot_token"]
+            chat_id = config["telegram"]["chat_id"]
+            if bot_token and chat_id:
+                msg = f"🐋 *WHALE ALERT*\n*Market:* {market}\n*Side:* {side}\n*Amount:* ${amount:,.2f}\n*Price:* {price:.4f}"
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={{"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}},
+                        timeout=10
+                    )
+                except Exception as e:
+                    logger.warning(f"Telegram error: {{e}}")
+
         seen_ids = new_seen
         first_run = False
         time.sleep(interval)
