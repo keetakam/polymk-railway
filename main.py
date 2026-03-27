@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
 🐋 Polymarket Whale Tracker
-Monitors Polymarket for large trades and sends Telegram alerts.
+Monitors Polymarket for large trades and serves a web dashboard.
 """
 
 import os
 import sys
 import time
 import logging
+import threading
 import requests
 import yaml
 import csv
 import json
 import argparse
 from datetime import datetime, timezone
+from collections import deque
 from dotenv import load_dotenv
 from colorama import init, Fore, Style
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
-# Initialize colorama for cross-platform colored output
 init(autoreset=True)
-
-# Load environment variables from .env file if present
 load_dotenv()
 
-# ─────────────────────────────────────────────
-# Logging setup
-# ─────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -33,430 +33,465 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── In-memory store ──────────────────────────────────────
+whale_trades: deque = deque(maxlen=100)   # last 100 whale trades
+stats = {"total": 0, "yes": 0, "no": 0, "last_updated": ""}
 
-# ─────────────────────────────────────────────
-# Config loader
-# ─────────────────────────────────────────────
-def load_config(path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file, with env var overrides."""
+# ── FastAPI app ──────────────────────────────────────────
+app = FastAPI(title="Polymarket Whale Tracker")
+app.add_middleware(CORSMiddleware, allow_origins=["*"])
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🐋 Polymarket Whale Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --bg: #050810;
+    --surface: #0d1117;
+    --border: #1a2332;
+    --accent: #00d4ff;
+    --yes: #00ff88;
+    --no: #ff4466;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --card: #0a0f1a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  /* animated grid bg */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; position: relative; z-index: 1; }
+
+  /* header */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 32px; padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo { display: flex; align-items: center; gap: 12px; }
+  .logo-icon { font-size: 32px; animation: bob 3s ease-in-out infinite; }
+  @keyframes bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+  .logo h1 { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+  .logo h1 span { color: var(--accent); }
+  .status {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: var(--muted);
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--yes);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+  #last-updated { color: var(--muted); font-size: 11px; }
+
+  /* stats row */
+  .stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    position: relative; overflow: hidden;
+  }
+  .stat-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  }
+  .stat-card.total::before { background: var(--accent); }
+  .stat-card.yes::before { background: var(--yes); }
+  .stat-card.no::before { background: var(--no); }
+  .stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }
+  .stat-value { font-family: 'Syne', sans-serif; font-size: 36px; font-weight: 800; }
+  .stat-card.total .stat-value { color: var(--accent); }
+  .stat-card.yes .stat-value { color: var(--yes); }
+  .stat-card.no .stat-value { color: var(--no); }
+
+  /* countdown */
+  .refresh-bar {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 20px; font-size: 11px; color: var(--muted);
+  }
+  .progress-track {
+    flex: 1; height: 2px; background: var(--border); border-radius: 2px; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; background: var(--accent);
+    border-radius: 2px;
+    transition: width 1s linear;
+  }
+
+  /* table */
+  .table-wrap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .table-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .table-header h2 { font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700; }
+  .badge {
+    background: rgba(0,212,255,0.1); color: var(--accent);
+    border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 20px; padding: 2px 10px; font-size: 11px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; padding: 12px 20px;
+    font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: 14px 20px; font-size: 13px; border-bottom: 1px solid rgba(26,35,50,0.5); }
+  tr:last-child td { border-bottom: none; }
+  tr { transition: background 0.15s; }
+  tr:hover td { background: rgba(0,212,255,0.03); }
+
+  .side-yes {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--yes); font-weight: 700; font-size: 12px;
+  }
+  .side-no {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--no); font-weight: 700; font-size: 12px;
+  }
+  .amount { color: #fbbf24; font-weight: 700; }
+  .market { color: var(--text); max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .price { color: var(--muted); }
+  .ts { color: var(--muted); font-size: 11px; }
+
+  .empty {
+    text-align: center; padding: 60px 20px;
+    color: var(--muted); font-size: 13px;
+  }
+  .empty .emoji { font-size: 40px; display: block; margin-bottom: 12px; }
+
+  /* new row animation */
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-12px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .new-row td { animation: slideIn 0.4s ease forwards; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">
+      <span class="logo-icon">🐋</span>
+      <h1>Polymarket <span>Whale</span> Tracker</h1>
+    </div>
+    <div class="status">
+      <div class="dot"></div>
+      <span>LIVE</span>
+      &nbsp;·&nbsp;
+      <span id="last-updated">–</span>
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat-card total">
+      <div class="stat-label">Total Whales</div>
+      <div class="stat-value" id="stat-total">0</div>
+    </div>
+    <div class="stat-card yes">
+      <div class="stat-label">YES Trades</div>
+      <div class="stat-value" id="stat-yes">0</div>
+    </div>
+    <div class="stat-card no">
+      <div class="stat-label">NO Trades</div>
+      <div class="stat-value" id="stat-no">0</div>
+    </div>
+  </div>
+
+  <div class="refresh-bar">
+    <span id="countdown">refresh in 30:00</span>
+    <div class="progress-track">
+      <div class="progress-fill" id="progress" style="width:100%"></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <div class="table-header">
+      <h2>Recent Whale Trades</h2>
+      <span class="badge" id="count-badge">0 trades</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Market</th>
+          <th>Side</th>
+          <th>Amount</th>
+          <th>Price</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr><td colspan="5" class="empty"><span class="emoji">🌊</span>Waiting for whale trades...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const REFRESH_MS = 30 * 60 * 1000; // 30 minutes
+let timeLeft = REFRESH_MS / 1000;
+let knownIds = new Set();
+
+function fmt(ts) {
+  if (!ts) return '–';
+  const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z');
+  return d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+function buildRow(t, isNew) {
+  const side = t.side === 'YES'
+    ? `<span class="side-yes">▲ YES</span>`
+    : `<span class="side-no">▼ NO</span>`;
+  const cls = isNew ? 'class="new-row"' : '';
+  return `<tr ${cls}>
+    <td class="ts">${fmt(t.timestamp)}</td>
+    <td class="market" title="${t.market}">${t.market}</td>
+    <td>${side}</td>
+    <td class="amount">$${Number(t.amount_usd).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
+    <td class="price">${Number(t.price).toFixed(4)}</td>
+  </tr>`;
+}
+
+async function fetchData() {
+  try {
+    const res = await fetch('/api/trades');
+    const data = await res.json();
+
+    document.getElementById('stat-total').textContent = data.stats.total;
+    document.getElementById('stat-yes').textContent = data.stats.yes;
+    document.getElementById('stat-no').textContent = data.stats.no;
+    document.getElementById('last-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+    document.getElementById('count-badge').textContent = data.trades.length + ' trades';
+
+    const tbody = document.getElementById('trades-body');
+    if (data.trades.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty"><span class="emoji">🌊</span>Waiting for whale trades...</td></tr>';
+      return;
+    }
+
+    const newIds = new Set(data.trades.map(t => t.id));
+    const rows = data.trades.map(t => buildRow(t, !knownIds.has(t.id))).join('');
+    tbody.innerHTML = rows;
+    knownIds = newIds;
+  } catch(e) {
+    console.error('Fetch error:', e);
+  }
+}
+
+// countdown timer
+function startCountdown() {
+  timeLeft = REFRESH_MS / 1000;
+  const interval = setInterval(() => {
+    timeLeft--;
+    const m = Math.floor(timeLeft / 60).toString().padStart(2,'0');
+    const s = (timeLeft % 60).toString().padStart(2,'0');
+    document.getElementById('countdown').textContent = `refresh in ${m}:${s}`;
+    const pct = (timeLeft / (REFRESH_MS / 1000)) * 100;
+    document.getElementById('progress').style.width = pct + '%';
+    if (timeLeft <= 0) {
+      clearInterval(interval);
+      fetchData();
+      startCountdown();
+    }
+  }, 1000);
+}
+
+fetchData();
+startCountdown();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    return DASHBOARD_HTML
+
+
+@app.get("/api/trades")
+async def get_trades():
+    return JSONResponse({
+        "trades": list(whale_trades),
+        "stats": stats,
+    })
+
+
+# ── Config ───────────────────────────────────────────────
+def load_config(path="config.yaml"):
     config = {
         "min_trade_size": 500,
         "check_interval": 30,
-        "telegram": {
-            "bot_token": "",
-            "chat_id": "",
-        },
-        "discord": {
-            "webhook_url": "",
-        },
-        "polymarket": {
-            "api_url": "https://clob.polymarket.com",
-        },
+        "telegram": {"bot_token": "", "chat_id": ""},
+        "discord": {"webhook_url": ""},
+        "polymarket": {"api_url": "https://data-api.polymarket.com"},
     }
-
     if os.path.exists(path):
-        with open(path, "r") as f:
+        with open(path) as f:
             loaded = yaml.safe_load(f)
             if loaded:
-                # Deep merge
-                for key, val in loaded.items():
-                    if isinstance(val, dict) and key in config:
-                        config[key].update(val)
+                for k, v in loaded.items():
+                    if isinstance(v, dict) and k in config:
+                        config[k].update(v)
                     else:
-                        config[key] = val
+                        config[k] = v
 
-    # Environment variable overrides (takes priority over YAML)
+    if os.getenv("MIN_TRADE_SIZE"):
+        config["min_trade_size"] = float(os.getenv("MIN_TRADE_SIZE"))
     if os.getenv("TELEGRAM_BOT_TOKEN"):
         config["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
         config["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
     if os.getenv("DISCORD_WEBHOOK_URL"):
         config["discord"]["webhook_url"] = os.getenv("DISCORD_WEBHOOK_URL")
-    if os.getenv("MIN_TRADE_SIZE"):
-        config["min_trade_size"] = float(os.getenv("MIN_TRADE_SIZE"))
-
     return config
 
 
-# ─────────────────────────────────────────────
-# Polymarket API
-# ─────────────────────────────────────────────
-def fetch_recent_trades(api_url: str, limit: int = 100) -> list:
-    """Fetch recent trades from Polymarket CLOB API."""
+# ── Fetch trades ─────────────────────────────────────────
+def fetch_recent_trades(limit=100):
     url = "https://data-api.polymarket.com/trades"
-    params = {"limit": limit, "size": limit}
+    params = {"limit": limit}
     try:
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        # The CLOB API returns {"data": [...], "next_cursor": ...}
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        # Some endpoints return a list directly
         if isinstance(data, list):
             return data
-        return []
-    except requests.exceptions.ConnectionError:
-        logger.warning("⚠️  Network error: could not reach Polymarket API.")
-        return []
-    except requests.exceptions.Timeout:
-        logger.warning("⚠️  Request timed out fetching trades.")
-        return []
-    except requests.exceptions.HTTPError as e:
-        logger.warning(f"⚠️  HTTP error fetching trades: {e}")
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
         return []
     except Exception as e:
-        logger.warning(f"⚠️  Unexpected error fetching trades: {e}")
+        logger.warning(f"⚠️  Error fetching trades: {e}")
         return []
 
 
-def fetch_market_info(condition_id: str) -> dict:
-    """
-    Fetch market metadata (title, etc.) from Polymarket Gamma API.
-    Returns a dict with at least 'question' key.
-    """
-    url = "https://gamma-api.polymarket.com/markets"
-    params = {"condition_id": condition_id}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list) and len(data) > 0:
-            return data[0]
-        if isinstance(data, dict):
-            return data
-        return {}
-    except Exception as e:
-        logger.debug(f"Could not fetch market info for {condition_id}: {e}")
-        return {}
+def format_side(side):
+    s = str(side).upper()
+    if s in ("YES", "BUY", "1"): return "YES"
+    if s in ("NO", "SELL", "0"): return "NO"
+    return s
 
 
-# ─────────────────────────────────────────────
-# Trade processing
-# ─────────────────────────────────────────────
-def parse_trade_usd_size(trade: dict) -> float:
-    """
-    Calculate the USD size of a trade.
-    size * price gives approximate USD value for a YES trade;
-    size * (1 - price) for a NO trade — but simpler: use size as USDC shares.
-    Polymarket CLOB: 'size' is the number of outcome shares, 'price' is in USD.
-    USD value = size * price (for market buys).
-    """
+def parse_usd(trade):
     try:
-        size = float(trade.get("size", 0))
-        price = float(trade.get("price", 0))
-        return size * price
-    except (TypeError, ValueError):
+        return float(trade.get("size", 0)) * float(trade.get("price", 0))
+    except:
         return 0.0
 
 
-def format_side(side: str) -> str:
-    """Normalize side string to YES/NO."""
-    s = str(side).upper()
-    if s in ("YES", "BUY", "1"):
-        return "YES"
-    if s in ("NO", "SELL", "0"):
-        return "NO"
-    return side.upper()
+_market_cache = {}
 
-
-def trade_unique_id(trade: dict) -> str:
-    """Generate a unique identifier for a trade to avoid duplicate alerts."""
-    return trade.get("id") or trade.get("trade_id") or str(trade)
-
-
-# ─────────────────────────────────────────────
-# Formatting
-# ─────────────────────────────────────────────
-DIVIDER = "─" * 43
-
-
-def format_terminal_alert(market_title: str, side: str, amount_usd: float,
-                           price: float, timestamp: str) -> str:
-    """Format a colorful terminal alert message."""
-    ts = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    side_color = Fore.GREEN if side == "YES" else Fore.RED
-    prob_pct = int(price * 100) if side == "YES" else int((1 - price) * 100)
-
-    lines = [
-        f"\n{Fore.CYAN}🐋 WHALE ALERT{Style.RESET_ALL}  {Fore.YELLOW}{ts}{Style.RESET_ALL}",
-        f"{Fore.WHITE}{DIVIDER}{Style.RESET_ALL}",
-        f"{Fore.WHITE}Market:{Style.RESET_ALL} {market_title}",
-        f"{Fore.WHITE}Side:  {Style.RESET_ALL} {side_color}{side}{Style.RESET_ALL}",
-        f"{Fore.WHITE}Amount:{Style.RESET_ALL} {Fore.YELLOW}${amount_usd:,.2f}{Style.RESET_ALL}",
-        f"{Fore.WHITE}Price: {Style.RESET_ALL} {price:.4f} ({side_color}{prob_pct}% {side}{Style.RESET_ALL})",
-        f"{Fore.WHITE}{DIVIDER}{Style.RESET_ALL}",
-    ]
-    return "\n".join(lines)
-
-
-def format_telegram_message(market_title: str, side: str, amount_usd: float,
-                             price: float, timestamp: str) -> str:
-    """Format a Telegram alert message (plain text, emoji-rich)."""
-    ts = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    side_emoji = "✅" if side == "YES" else "❌"
-    prob_pct = int(price * 100) if side == "YES" else int((1 - price) * 100)
-
-    return (
-        f"🐋 *WHALE ALERT*  `{ts}`\n"
-        f"{'─' * 30}\n"
-        f"*Market:* {market_title}\n"
-        f"*Side:*    {side_emoji} {side}\n"
-        f"*Amount:* `${amount_usd:,.2f}`\n"
-        f"*Price:*   `{price:.4f}` ({prob_pct}% {side})\n"
-        f"{'─' * 30}"
-    )
-
-
-# ─────────────────────────────────────────────
-# Telegram sender
-# ─────────────────────────────────────────────
-def send_telegram_alert(bot_token: str, chat_id: str, message: str) -> bool:
-    """Send a message via Telegram Bot API. Returns True on success."""
-    if not bot_token or not chat_id:
-        logger.debug("Telegram not configured — skipping alert.")
-        return False
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
+def get_market_title(condition_id):
+    if not condition_id: return "Unknown Market"
+    if condition_id in _market_cache: return _market_cache[condition_id]
     try:
-        resp = requests.post(url, json=payload, timeout=10)
-        resp.raise_for_status()
-        return True
-    except requests.exceptions.HTTPError as e:
-        logger.warning(f"Telegram HTTP error: {e} — response: {resp.text[:200]}")
-        return False
-    except Exception as e:
-        logger.warning(f"Failed to send Telegram alert: {e}")
-        return False
-
-
-def format_discord_message(market_title: str, side: str, amount_usd: float,
-                            price: float, timestamp: str) -> str:
-    """Format a Discord alert message."""
-    ts = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    side_emoji = "✅" if side == "YES" else "❌"
-    prob_pct = int(price * 100) if side == "YES" else int((1 - price) * 100)
-
-    return (
-        f"🐋 **WHALE ALERT**  `{ts}`\n"
-        f"{'─' * 30}\n"
-        f"**Market:** {market_title}\n"
-        f"**Side:**    {side_emoji} {side}\n"
-        f"**Amount:** `${amount_usd:,.2f}`\n"
-        f"**Price:**   `{price:.4f}` ({prob_pct}% {side})\n"
-        f"{'─' * 30}"
-    )
-
-
-def send_discord_alert(webhook_url: str, message: str) -> bool:
-    """Send a message via Discord Webhook API. Returns True on success."""
-    if not webhook_url:
-        logger.debug("Discord not configured — skipping alert.")
-        return False
-
-    payload = {
-        "content": message,
-    }
-    try:
-        resp = requests.post(webhook_url, json=payload, timeout=10)
-        resp.raise_for_status()
-        return True
-    except requests.exceptions.HTTPError as e:
-        logger.warning(f"Discord HTTP error: {e}")
-        return False
-    except Exception as e:
-        logger.warning(f"Failed to send Discord alert: {e}")
-        return False
-
-
-
-
-def export_trade(file_path: str, trade_data: dict) -> None:
-    """Export trade data to a CSV or JSON file."""
-    if not file_path:
-        return
-
-    ext = os.path.splitext(file_path)[1].lower()
-    
-    if ext == ".csv":
-        file_exists = os.path.isfile(file_path)
-        with open(file_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=trade_data.keys())
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(trade_data)
-    elif ext == ".json":
-        all_data = []
-        if os.path.isfile(file_path):
-            try:
-                with open(file_path, "r") as f:
-                    all_data = json.load(f)
-            except (json.JSONDecodeError, ValueError):
-                all_data = []
-        
-        all_data.append(trade_data)
-        with open(file_path, "w") as f:
-            json.dump(all_data, f, indent=2)
-    else:
-        logger.warning(f"Unsupported export format: {ext}. Use .csv or .json.")
-
-# ─────────────────────────────────────────────
-# Market info cache (avoid hammering the API)
-# ─────────────────────────────────────────────
-_market_cache: dict = {}
-
-
-def get_market_title(condition_id: str) -> str:
-    """Return market title, using a local cache to reduce API calls."""
-    if condition_id in _market_cache:
-        return _market_cache[condition_id]
-
-    info = fetch_market_info(condition_id)
-    title = (
-        info.get("question")
-        or info.get("title")
-        or info.get("name")
-        or f"Market {condition_id[:10]}..."
-    )
+        resp = requests.get("https://gamma-api.polymarket.com/markets",
+                            params={"condition_id": condition_id}, timeout=8)
+        data = resp.json()
+        info = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+        title = info.get("question") or info.get("title") or f"Market {condition_id[:10]}..."
+    except:
+        title = f"Market {condition_id[:10]}..."
     _market_cache[condition_id] = title
     return title
 
 
-# ─────────────────────────────────────────────
-# Main loop
-# ─────────────────────────────────────────────
-def run(config: dict, export_path: str = None) -> None:
-    """Main monitoring loop."""
+# ── Tracker loop ─────────────────────────────────────────
+def tracker_loop(config):
     min_size = float(config["min_trade_size"])
-    interval = int(config["check_interval"])
-    # Allow env var override — useful for geo-restricted regions
-    # Set POLYMARKET_API_URL=https://polyclawster.com/api/clob-relay to bypass geo-blocks
-    api_url = os.getenv("POLYMARKET_API_URL", config["polymarket"]["api_url"])
-    bot_token = config["telegram"]["bot_token"]
-    chat_id = config["telegram"]["chat_id"]
-    discord_webhook = config["discord"]["webhook_url"]
-
-    telegram_enabled = bool(bot_token and chat_id and
-                            bot_token != "YOUR_BOT_TOKEN" and
-                            chat_id != "YOUR_CHAT_ID")
-    discord_enabled = bool(discord_webhook and
-                           discord_webhook != "YOUR_DISCORD_WEBHOOK_URL")
-
-    print(f"\n{Fore.CYAN}{'═' * 50}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}🐋  Polymarket Whale Tracker — Starting up{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'═' * 50}{Style.RESET_ALL}")
-    print(f"  Min trade size : {Fore.YELLOW}${min_size:,.0f}{Style.RESET_ALL}")
-    print(f"  Check interval : {Fore.YELLOW}{interval}s{Style.RESET_ALL}")
-    print(f"  Telegram alerts: {Fore.GREEN+'ON' if telegram_enabled else Fore.RED+'OFF'}{Style.RESET_ALL}")
-    print(f"  Discord alerts : {Fore.GREEN+'ON' if discord_enabled else Fore.RED+'OFF'}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'═' * 50}{Style.RESET_ALL}\n")
-
-    if not (telegram_enabled or discord_enabled):
-        logger.info("ℹ️  Alerts not configured — terminal-only mode.")
-
-    seen_ids: set = set()
+    interval = int(config.get("check_interval", 30))
+    seen_ids = set()
     first_run = True
 
-    while True:
-        try:
-            trades = fetch_recent_trades(api_url)
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            logger.error(f"Error in fetch loop: {e}")
-            trades = []
+    logger.info(f"🐋 Whale Tracker started — min ${min_size:,.0f}, interval {interval}s")
 
-        new_seen: set = set()
-        whale_count = 0
+    while True:
+        trades = fetch_recent_trades()
+        new_seen = set()
 
         for trade in trades:
-            trade_id = trade_unique_id(trade)
-            new_seen.add(trade_id)
-
-            # On first run, just populate seen_ids (don't alert on old trades)
-            if first_run:
+            tid = trade.get("id") or trade.get("trade_id") or str(trade)
+            new_seen.add(tid)
+            if first_run or tid in seen_ids:
                 continue
 
-            # Skip already-seen trades
-            if trade_id in seen_ids:
+            amount = parse_usd(trade)
+            if amount < min_size:
                 continue
 
-            # Calculate USD size and filter
-            amount_usd = parse_trade_usd_size(trade)
-            if amount_usd < min_size:
-                continue
-
-            whale_count += 1
-
-            # Get trade details
-            condition_id = trade.get("market") or trade.get("condition_id", "")
-            side_raw = trade.get("side", trade.get("outcome", ""))
-            side = format_side(side_raw)
+            side = format_side(trade.get("side") or trade.get("outcome", ""))
             price = float(trade.get("price", 0))
+            condition_id = trade.get("market") or trade.get("condition_id", "")
             ts_raw = trade.get("timestamp") or trade.get("created_at", "")
-
-            # Parse timestamp
-            if ts_raw:
-                try:
-                    if isinstance(ts_raw, (int, float)):
-                        ts = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                    else:
-                        ts = str(ts_raw)[:19].replace("T", " ")
-                except Exception:
-                    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            else:
+            try:
+                if isinstance(ts_raw, (int, float)):
+                    ts = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    ts = str(ts_raw)[:19].replace("T", " ")
+            except:
                 ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-            # Fetch market title
-            market_title = get_market_title(condition_id) if condition_id else "Unknown Market"
+            market = get_market_title(condition_id)
 
-            # Print terminal alert
-            print(format_terminal_alert(market_title, side, amount_usd, price, ts))
+            entry = {
+                "id": tid,
+                "timestamp": ts,
+                "market": market,
+                "side": side,
+                "amount_usd": round(amount, 2),
+                "price": price,
+            }
+            whale_trades.appendleft(entry)
+            stats["total"] += 1
+            if side == "YES": stats["yes"] += 1
+            else: stats["no"] += 1
+            stats["last_updated"] = ts
 
-            # Send Telegram alert
-            if telegram_enabled:
-                tg_msg = format_telegram_message(market_title, side, amount_usd, price, ts)
-                ok = send_telegram_alert(bot_token, chat_id, tg_msg)
-                if ok:
-                    logger.debug("✅ Telegram alert sent.")
+            logger.info(f"🐋 WHALE: {market[:40]} | {side} | ${amount:,.2f}")
 
-            # Send Discord alert
-            if discord_enabled:
-                ds_msg = format_discord_message(market_title, side, amount_usd, price, ts)
-                ok = send_discord_alert(discord_webhook, ds_msg)
-                if ok:
-                    logger.debug("✅ Discord alert sent.")
-
-        # Update seen set (keep it bounded)
         seen_ids = new_seen
         first_run = False
-
-        if whale_count == 0 and not first_run:
-            logger.info(f"No whale trades found this cycle. Sleeping {interval}s...")
-
         time.sleep(interval)
 
 
-# ─────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────
+# ── Entry point ──────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Polymarket Whale Tracker")
-    parser.add_argument("--config", default="config.yaml", help="Path to YAML config file")
-    parser.add_argument("--export", help="Export path for whale trades (.csv or .json)")
-    args = parser.parse_args()
-    cfg_path = args.config
+    config = load_config()
 
-    config = load_config(cfg_path)
+    # Start tracker in background thread
+    t = threading.Thread(target=tracker_loop, args=(config,), daemon=True)
+    t.start()
 
-    try:
-        run(config)
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}👋 Whale Tracker stopped.{Style.RESET_ALL}\n")
-        sys.exit(0)
+    # Start web server
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"🌐 Dashboard running on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
