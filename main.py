@@ -258,7 +258,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const REFRESH_MS = 30 * 60 * 1000; // 30 minutes
+const REFRESH_MS = 5 * 60 * 1000;  // 5 นาที
 let timeLeft = REFRESH_MS / 1000;
 let knownIds = new Set();
 
