@@ -488,7 +488,7 @@ def tracker_loop(config):
                 try:
                     requests.post(
                         f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                        json={{"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}},
+                        json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
                         timeout=10
                     )
                 except Exception as e:
