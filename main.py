@@ -460,7 +460,7 @@ def tracker_loop(config):
             except:
                 ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-            market = get_market_title(condition_id)
+            market = (trade.get("title") or trade.get("question") or get_market_title(condition_id)).strip()
 
             entry = {
                 "id": tid,
