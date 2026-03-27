@@ -373,6 +373,8 @@ def load_config(path="config.yaml"):
         config["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
     if os.getenv("DISCORD_WEBHOOK_URL"):
         config["discord"]["webhook_url"] = os.getenv("DISCORD_WEBHOOK_URL")
+    if os.getenv("CHECK_INTERVAL"):
+        config["check_interval"] = int(os.getenv("CHECK_INTERVAL"))
     return config
 
 
